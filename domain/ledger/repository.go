@@ -195,9 +195,15 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 }
 
 func (r *ledgerRepository) GetTransactionsByAccountID(ctx context.Context, accountID string, limit, offset int) ([]models.Transaction, error) {
-	var entries []models.LedgerEntry
+	// Subquery: find transaction IDs that involve this account
+	subQuery := r.db.WithContext(ctx).
+		Model(&models.LedgerEntry{}).
+		Select("DISTINCT transaction_id").
+		Where("account_id = ?", accountID)
+
 	query := r.db.WithContext(ctx).
-		Where("account_id = ?", accountID).
+		Where("id IN (?)", subQuery).
+		Preload("Entries").
 		Order("created_at DESC")
 
 	if limit > 0 {
@@ -207,30 +213,8 @@ func (r *ledgerRepository) GetTransactionsByAccountID(ctx context.Context, accou
 		query = query.Offset(offset)
 	}
 
-	if err := query.Find(&entries).Error; err != nil {
-		return nil, apperrors.NewDatabaseError("failed to fetch ledger entries", err)
-	}
-
-	if len(entries) == 0 {
-		return []models.Transaction{}, nil
-	}
-
-	// Collect unique transaction IDs
-	txnIDSet := make(map[string]struct{})
-	txnIDs := make([]string, 0)
-	for _, e := range entries {
-		if _, ok := txnIDSet[e.TransactionID]; !ok {
-			txnIDSet[e.TransactionID] = struct{}{}
-			txnIDs = append(txnIDs, e.TransactionID)
-		}
-	}
-
 	var transactions []models.Transaction
-	if err := r.db.WithContext(ctx).
-		Where("id IN ?", txnIDs).
-		Preload("Entries").
-		Order("created_at DESC").
-		Find(&transactions).Error; err != nil {
+	if err := query.Find(&transactions).Error; err != nil {
 		return nil, apperrors.NewDatabaseError("failed to fetch transactions", err)
 	}
 

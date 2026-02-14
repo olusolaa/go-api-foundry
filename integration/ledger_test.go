@@ -81,7 +81,10 @@ func (s *LedgerAPITestSuite) SetupTest() {
 	s.db.Exec("DELETE FROM ledger_entries")
 	s.db.Exec("DELETE FROM transactions")
 	s.db.Exec("DELETE FROM accounts WHERE id != ?", models.SystemAccountID)
-	s.db.Model(&models.Account{}).Where("id = ?", models.SystemAccountID).Update("balance", 0)
+	s.db.Model(&models.Account{}).Where("id = ?", models.SystemAccountID).Updates(map[string]interface{}{
+		"balance": 0,
+		"version": 0,
+	})
 }
 
 // Helper methods

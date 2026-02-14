@@ -41,6 +41,10 @@ CREATE INDEX IF NOT EXISTS idx_ledger_entries_transaction
 CREATE INDEX IF NOT EXISTS idx_transactions_idempotency
     ON transactions (idempotency_key);
 
+-- USER accounts must never have negative balance (defense-in-depth)
+ALTER TABLE accounts ADD CONSTRAINT chk_user_balance_non_negative
+    CHECK (account_type != 'USER' OR balance >= 0);
+
 -- Immutability trigger: prevent UPDATE/DELETE on ledger_entries
 CREATE OR REPLACE FUNCTION prevent_ledger_entry_mutation() RETURNS TRIGGER AS $$
 BEGIN
