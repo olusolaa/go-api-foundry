@@ -52,9 +52,29 @@ ledger_entries (immutable)
 
 ### Trade-offs
 
-1. **No partitioning/sharding**: Simple accounts table with row-level locks. Correct for the current scale; partitioning can be added later without changing the API.
-2. **Single `ExecuteDoubleEntry` method**: Deposit, withdrawal, and transfer are all the same operation (debit source, credit destination). DRY and provably correct.
-3. **SQLite for tests**: Integration tests use SQLite in-memory for speed. `FOR UPDATE` is a no-op on SQLite, which is acceptable since SQLite serializes all writes.
+| Decision | Why | Cost |
+|----------|-----|------|
+| **Pessimistic locking** (`SELECT ... FOR UPDATE`) | Simpler than optimistic locking (version check + retry loop). Correct under moderate write contention. | Holds row locks for the duration of the transaction. Under extreme contention, optimistic locking with retry would yield higher throughput. |
+| **Cached balance on accounts** | O(1) balance reads without scanning ledger entries. | Redundant data that must stay in sync. Mitigated by the reconciliation endpoint which proves correctness. |
+| **Single `ExecuteDoubleEntry` method** | Deposit, withdrawal, and transfer are all the same operation (debit source, credit destination). One code path = one place for bugs. | Less flexibility for operation-specific logic. Acceptable because the abstraction is mathematically exact. |
+| **Idempotency check after lock acquisition** | Avoids PostgreSQL's "current transaction is aborted" problem that occurs when a UNIQUE constraint violation is handled with a fallback SELECT inside a transaction. | Holds row locks slightly longer (idempotency lookup happens while locks are held). |
+| **System account can go negative** | Required for double-entry correctness — deposits must debit *something*. The system account is a bookkeeping counterparty, not real funds. | System account balance is a synthetic number. Operators must understand it represents net outflow, not a deficit. |
+| **Amounts in cents (`int64`)** | Eliminates all IEEE 754 floating-point precision issues. Standard financial practice. | API consumers must convert to/from display format (divide by 100 for dollars). |
+| **Sentinel errors at domain boundary** | Domain layer returns plain `errors.New` values. Controller maps to HTTP status codes via `errors.Is`. Domain stays HTTP-agnostic. | Mapping switch in the controller. Scales linearly with error count but stays co-located with handlers. |
+| **SQLite for integration tests** | Zero infrastructure, fast, in-memory. `FOR UPDATE` is a no-op on SQLite, but SQLite serializes all writes anyway, so concurrency correctness is still tested. | Does not exercise PostgreSQL-specific locking semantics. Add a PostgreSQL CI service for full coverage. |
+| **No partitioning/sharding** | Simple accounts table with row-level locks. Correct at moderate scale. | Would need horizontal partitioning for millions of concurrent accounts. The API contract does not change when this is added. |
+
+### Future Optimizations
+
+| Optimization | Impact | Complexity |
+|-------------|--------|------------|
+| **PostgreSQL in CI** | Exercises real `FOR UPDATE` locking and the immutability trigger. Currently only tested via SQLite. | Low — add a PostgreSQL service to GitHub Actions and run integration tests against it. |
+| **Read replicas for balance queries** | Balance and transaction history reads don't need the primary. Offloading reduces lock contention on writes. | Medium — requires connection routing (primary for writes, replica for reads). |
+| **Async reconciliation** | Reconciliation scans all accounts. At scale, this should be a background job with results cached, not a synchronous API call. | Medium — add a job scheduler (e.g., cron or a worker queue) and a reconciliation results table. |
+| **Batch transfers** | Process multiple transfers in a single database transaction to amortize lock acquisition overhead. | Medium — new API endpoint, careful lock ordering across N accounts. |
+| **Event sourcing** | Derive balances entirely from ledger entries, removing the cached balance. Eliminates reconciliation drift by design. | High — slower reads without materialized views or CQRS. Significant architectural change. |
+| **Horizontal partitioning** | Shard accounts by UUID prefix or tenant ID for massive scale. | High — requires a sharding strategy, cross-shard transfer handling, and distributed reconciliation. |
+| **Multi-currency transfers** | Support cross-currency transfers with exchange rate lookups and conversion entries. | High — adds FX rate sourcing, conversion ledger entries, and rounding rules. |
 
 ## API Endpoints
 
@@ -168,17 +188,16 @@ make migrate
 
 ```
 domain/ledger/
-├── controller.go       # HTTP handlers
-├── service.go          # Business logic
+├── controller.go       # HTTP handlers + mapDomainError boundary
+├── service.go          # Business logic + validation
 ├── repository.go       # Data access + double-entry execution
 ├── dto.go              # Request/response DTOs + mappers
-├── errors.go           # Domain error types
-├── factory.go          # Dependency injection
-├── mock_repository.go  # Generated mock for testing
-└── service_test.go     # Unit tests (25 cases)
+├── errors.go           # Sentinel errors (var ErrXxx = errors.New(...))
+├── mock_repository.go  # Generated mock (mockgen)
+└── service_test.go     # Unit tests (32 cases, table-driven)
 
 integration/
-└── ledger_test.go      # Integration tests (13 cases)
+└── ledger_test.go      # Integration tests (21 cases, incl. concurrency)
 
 migrations/
 ├── 000002_ledger.up.sql    # Schema + trigger + seed
