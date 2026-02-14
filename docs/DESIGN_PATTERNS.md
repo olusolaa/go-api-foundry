@@ -1,13 +1,13 @@
 # Design Patterns
 
-This section summarizes the main design patterns used in this template and where they live.
+This section summarizes the main design patterns used in this project and where they live.
 
 ## Implemented Patterns
 
 ### 1. Strategy Pattern - Rate Limiting
 **Location:** `pkg/ratelimit/strategy.go`
 
-The Strategy Pattern eliminates conditional logic for different rate limiting implementations (in-memory vs Redis-based). The `RateLimiter` interface allows seamless switching between implementations without changing client code.
+The Strategy Pattern eliminates conditional logic for different rate limiting implementations (in-memory vs Redis-backed). The `RateLimiter` interface allows seamless switching between implementations without changing client code.
 
 **Notes:**
 - Clean separation of rate limiting algorithms
@@ -31,76 +31,39 @@ config := &ratelimit.RateLimitConfig{
 rateLimiter := ratelimit.NewRateLimiter(config)
 ```
 
-### 2. Factory Pattern - Domain-Specific Service Creation
-**Location:** `domain/*/factory.go` (e.g., `domain/waitlist/factory.go`, `domain/monitoring/factory.go`)
+### 2. Sentinel Errors - Domain Error Handling
+**Location:** `domain/ledger/errors.go`
 
-The Factory Pattern is implemented per domain to create services and controllers, promoting Domain-Driven Design (DDD) principles by keeping component instantiation within bounded contexts.
+Domain errors are plain Go sentinel values (`var ErrXxx = errors.New(...)`) checked with `errors.Is`. HTTP status mapping happens at the controller boundary via a `mapDomainError` switch, keeping the domain layer free of HTTP concerns.
 
 **Benefits:**
-- Decentralized dependency management per domain
-- Adheres to Single Responsibility Principle (SRP)
-- Prevents God object anti-pattern in global factories
-- Easy mocking for unit tests within domains
-- Loose coupling and high cohesion
+- Idiomatic Go error handling
+- Domain layer has zero HTTP awareness
+- `errors.Is` for reliable error matching
+- Single mapping function at the controller boundary
 
 **Usage:**
 ```go
-// Domain-specific factory instantiation
-waitlistFactory := waitlist.NewWaitlistServiceFactory(db, logger)
-controller := waitlistFactory.CreateController()
-
-// Or for monitoring
-monitoringFactory := monitoring.NewMonitoringControllerFactory(db, logger, redisClient)
-controller := monitoringFactory.CreateController()
-```
-
-### 3. Circuit Breaker Pattern - Fault Tolerance
-**Location:** `pkg/circuitbreaker/circuitbreaker.go`
-
-The Circuit Breaker Pattern provides resilience against cascading failures by monitoring service health and preventing calls to failing services.
-
-**Benefits:**
-- Prevents system overload during failures
-- Fast failure detection and recovery
-- Automatic recovery testing
-- Configurable failure thresholds
-
-**Usage:**
-```go
-cb := circuitbreaker.NewCircuitBreaker(circuitbreaker.Config{
-    FailureThreshold: 5,
-    RecoveryTimeout:  time.Minute,
-    MonitoringPeriod: time.Minute,
-})
-
-result, err := cb.Execute(func() (interface{}, error) {
-    return someExternalCall()
-})
-```
-
-### 4. Retry Pattern - Transient Failure Handling
-**Location:** `pkg/retry/retry.go`
-
-The Retry Pattern handles transient failures with exponential backoff and configurable retry strategies.
-
-**Benefits:**
-- Automatic retry for transient failures
-- Configurable backoff strategies
-- Prevents thundering herd problems
-- Comprehensive error handling
-
-**Usage:**
-```go
-retryConfig := retry.Config{
-    MaxAttempts: 3,
-    BaseDelay:   time.Second,
-    MaxDelay:    time.Minute,
+// Domain layer returns sentinels
+if source.Balance < amount {
+    return ErrInsufficientFunds
 }
 
-result, err := retry.WithExponentialBackoff(retryConfig, func() error {
-    return someUnreliableOperation()
-})
+// Controller maps at boundary
+code, msg := mapDomainError(err)
+return router.ErrorResult(code, msg, nil)
 ```
+
+### 3. Double-Entry Bookkeeping - Financial Correctness
+**Location:** `domain/ledger/repository.go`
+
+Every monetary operation creates exactly one DEBIT and one CREDIT entry within a single database transaction. Deterministic lock ordering prevents deadlocks and idempotency keys ensure exactly-once processing.
+
+**Guarantees:**
+- Total debits always equal total credits (zero-sum)
+- Pessimistic locking with `SELECT ... FOR UPDATE`
+- Deterministic lock ordering via `slices.Sort` on account IDs
+- Cached balances verified by reconciliation endpoint
 
 ## Integration Points
 
@@ -111,10 +74,10 @@ The router uses the Strategy Pattern for rate limiting:
 - Automatic fallback to in-memory if Redis is not configured or unreachable
 
 ### Domain Layer
-The domain layer uses domain-specific Factory Patterns for component creation:
-- Decentralized controller and service instantiation per bounded context
-- Proper dependency injection within domains
-- Testable service creation aligned with DDD principles
+Each domain mounts its controller directly in `domain/main.go`:
+- Repository, service, and controller instantiated inline
+- Proper dependency injection via constructor functions
+- Testable via interfaces and mock generation
 
 ## Configuration
 
@@ -148,14 +111,8 @@ rateLimiter = &mockRateLimiter{}
 
 ## Summary
 
-1. **Maintainability:** Clean interfaces and separation of concerns with DDD alignment
-2. **Testability:** Dependency injection enables comprehensive testing per domain
+1. **Maintainability:** Clean interfaces and separation of concerns
+2. **Testability:** Dependency injection enables comprehensive testing
 3. **Scalability:** Strategy pattern allows horizontal scaling with Redis
-4. **Resilience:** Circuit breaker and retry patterns handle failures gracefully
-5. **Flexibility:** Domain-specific factories enable easy component swapping without global coupling
-6. **Operational readiness:** Reusable building blocks for timeouts, retries, and limiting
-
-## Future Enhancements
-
-- Add configuration validation
-- Create additional integration tests for failure modes (Redis down, timeouts, etc.)
+4. **Correctness:** Double-entry bookkeeping with reconciliation proves balances
+5. **Idiomatic Go:** Sentinel errors, table-driven tests, minimal abstractions

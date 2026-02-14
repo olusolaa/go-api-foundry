@@ -50,8 +50,7 @@ make dev
 ### Docker Compose
 
 - Development compose: [docker-compose.dev.yaml](../docker-compose.dev.yaml)
-  - Includes `api`, `postgres`, `redis`, plus extra infra containers (LocalStack + RabbitMQ) for local experimentation.
-  - The application template does not require LocalStack/RabbitMQ by default; remove them if you don’t use them.
+  - Includes `api`, `postgres`, and `redis` services.
 
 ```bash
 docker-compose -f docker-compose.dev.yaml up --build
@@ -220,10 +219,11 @@ Headers:
 
 ## Errors
 
-Guideline: return typed errors from repositories/services and let controllers translate them into HTTP responses.
+Guideline: return sentinel errors from domain code and let controllers translate them into HTTP responses.
 
-- Prefer `pkg/errors.AppError` constructors (e.g., `NewNotFoundError`, `NewInvalidRequestError`).
-- Avoid returning raw internal errors directly to clients.
+- Domain errors: use `var ErrXxx = errors.New(...)` sentinels checked with `errors.Is`.
+- Infrastructure errors: use `pkg/errors.AppError` constructors (e.g., `NewDatabaseError`, `NewConflictError`).
+- Controller boundary: map domain sentinels to HTTP codes via `errors.Is` switch; infrastructure errors fall through to `pkg/errors.HTTPStatusCode`.
 - `GetHumanReadableMessage` intentionally returns a generic message for non-`AppError` inputs.
 
 ## Adding a New Domain
@@ -241,17 +241,17 @@ Then:
 3. Implement repository/service/controller in `domain/<name>/`
 4. Mount the controller in `domain/main.go`
 
-### Reference implementation: Waitlist
+### Reference implementation: Ledger
 
-The [domain/waitlist/](../domain/waitlist/) domain is the canonical onboarding example.
+The [domain/ledger/](../domain/ledger/) domain is the canonical implementation.
 
 It shows the intended structure and conventions for:
 
-- DTOs with Gin binding validation (create vs update semantics)
+- DTOs with Gin binding validation
 - Controller wiring with the router service and consistent error responses
-- Service-layer validation and typed errors
-- Repository patterns with GORM and error mapping
-- Unit tests (service) and integration tests (HTTP)
+- Sentinel domain errors with HTTP mapping at the controller boundary
+- Repository patterns with GORM, pessimistic locking, and error mapping
+- Unit tests (service, table-driven) and integration tests (HTTP)
 
 ## Testing
 
