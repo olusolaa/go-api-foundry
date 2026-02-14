@@ -11,6 +11,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -40,3 +56,9 @@ jobs:
 
       - name: Race
         run: go test -race ./...
+
+      - name: Integration tests
+        env:
+          RUN_INTEGRATION_TESTS: "true"
+          APP_DATABASE_URL: "postgres://ledger:ledger@localhost:5432/ledger_test?sslmode=disable"
+        run: go test -v ./integration/...
