@@ -86,6 +86,37 @@ func (mr *MockLedgerRepositoryMockRecorder) GetAccountByID(ctx, id any) *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAccountByID", reflect.TypeOf((*MockLedgerRepository)(nil).GetAccountByID), ctx, id)
 }
 
+// GetBalanceSnapshot mocks base method.
+func (m *MockLedgerRepository) GetBalanceSnapshot(ctx context.Context, accountID string) (*BalanceSnapshot, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetBalanceSnapshot", ctx, accountID)
+	ret0, _ := ret[0].(*BalanceSnapshot)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetBalanceSnapshot indicates an expected call of GetBalanceSnapshot.
+func (mr *MockLedgerRepositoryMockRecorder) GetBalanceSnapshot(ctx, accountID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetBalanceSnapshot", reflect.TypeOf((*MockLedgerRepository)(nil).GetBalanceSnapshot), ctx, accountID)
+}
+
+// GetLedgerTotals mocks base method.
+func (m *MockLedgerRepository) GetLedgerTotals(ctx context.Context) (int64, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLedgerTotals", ctx)
+	ret0, _ := ret[0].(int64)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetLedgerTotals indicates an expected call of GetLedgerTotals.
+func (mr *MockLedgerRepositoryMockRecorder) GetLedgerTotals(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLedgerTotals", reflect.TypeOf((*MockLedgerRepository)(nil).GetLedgerTotals), ctx)
+}
+
 // GetAllAccountsForReconciliation mocks base method.
 func (m *MockLedgerRepository) GetAllAccountsForReconciliation(ctx context.Context) ([]AccountReconciliation, error) {
 	m.ctrl.T.Helper()
@@ -99,21 +130,6 @@ func (m *MockLedgerRepository) GetAllAccountsForReconciliation(ctx context.Conte
 func (mr *MockLedgerRepositoryMockRecorder) GetAllAccountsForReconciliation(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllAccountsForReconciliation", reflect.TypeOf((*MockLedgerRepository)(nil).GetAllAccountsForReconciliation), ctx)
-}
-
-// GetDerivedBalance mocks base method.
-func (m *MockLedgerRepository) GetDerivedBalance(ctx context.Context, accountID string) (int64, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetDerivedBalance", ctx, accountID)
-	ret0, _ := ret[0].(int64)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetDerivedBalance indicates an expected call of GetDerivedBalance.
-func (mr *MockLedgerRepositoryMockRecorder) GetDerivedBalance(ctx, accountID any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDerivedBalance", reflect.TypeOf((*MockLedgerRepository)(nil).GetDerivedBalance), ctx, accountID)
 }
 
 // GetTransactionsByAccountID mocks base method.

@@ -1,25 +1,14 @@
 package ledger
 
-import (
-	apperrors "github.com/akeren/go-api-foundry/pkg/errors"
+import "errors"
+
+// Sentinel errors for the ledger domain.
+var (
+	ErrInsufficientFunds      = errors.New("insufficient funds")
+	ErrCurrencyMismatch       = errors.New("currency mismatch between accounts")
+	ErrAccountNotFound        = errors.New("account not found")
+	ErrSelfTransfer           = errors.New("cannot transfer to the same account")
+	ErrInvalidAmount          = errors.New("amount must be greater than zero")
+	ErrIdempotencyConflict    = errors.New("idempotency key already used with different parameters")
+	ErrSystemAccountForbidden = errors.New("operations on the system account are not allowed")
 )
-
-func NewInsufficientFundsError() *apperrors.AppError {
-	return apperrors.NewInvalidRequestError("insufficient funds", nil)
-}
-
-func NewCurrencyMismatchError() *apperrors.AppError {
-	return apperrors.NewInvalidRequestError("currency mismatch between accounts", nil)
-}
-
-func NewAccountNotFoundError() *apperrors.AppError {
-	return apperrors.NewNotFoundError("account not found", nil)
-}
-
-func NewSelfTransferError() *apperrors.AppError {
-	return apperrors.NewInvalidRequestError("cannot transfer to the same account", nil)
-}
-
-func NewInvalidAmountError() *apperrors.AppError {
-	return apperrors.NewInvalidRequestError("amount must be greater than zero", nil)
-}

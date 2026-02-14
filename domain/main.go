@@ -7,9 +7,6 @@ import (
 )
 
 func SetupCoreDomain(appConfig *config.ApplicationConfig) {
-	monitoringFactory := monitoring.NewMonitoringControllerFactory(appConfig.DB, appConfig.Logger, appConfig.Cache)
-	appConfig.RouterService.MountController(monitoringFactory.CreateController())
-
-	ledgerFactory := ledger.NewLedgerServiceFactory(appConfig.DB, appConfig.Logger)
-	appConfig.RouterService.MountController(ledgerFactory.CreateController())
+	appConfig.RouterService.MountController(monitoring.NewMonitoringController(appConfig.DB, appConfig.Logger, appConfig.Cache))
+	appConfig.RouterService.MountController(ledger.NewLedgerController(appConfig.DB, appConfig.Logger))
 }

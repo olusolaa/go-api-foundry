@@ -79,7 +79,11 @@ func (s *ledgerService) Deposit(ctx context.Context, accountID string, req *Depo
 	}
 
 	if req.Amount <= 0 {
-		return nil, NewInvalidAmountError()
+		return nil, ErrInvalidAmount
+	}
+
+	if accountID == models.SystemAccountID {
+		return nil, ErrSystemAccountForbidden
 	}
 
 	cmd := DoubleEntryCommand{
@@ -116,7 +120,11 @@ func (s *ledgerService) Withdraw(ctx context.Context, accountID string, req *Wit
 	}
 
 	if req.Amount <= 0 {
-		return nil, NewInvalidAmountError()
+		return nil, ErrInvalidAmount
+	}
+
+	if accountID == models.SystemAccountID {
+		return nil, ErrSystemAccountForbidden
 	}
 
 	cmd := DoubleEntryCommand{
@@ -153,11 +161,15 @@ func (s *ledgerService) Transfer(ctx context.Context, req *TransferRequest) (*Tr
 	}
 
 	if req.SourceAccountID == req.DestAccountID {
-		return nil, NewSelfTransferError()
+		return nil, ErrSelfTransfer
 	}
 
 	if req.Amount <= 0 {
-		return nil, NewInvalidAmountError()
+		return nil, ErrInvalidAmount
+	}
+
+	if req.SourceAccountID == models.SystemAccountID || req.DestAccountID == models.SystemAccountID {
+		return nil, ErrSystemAccountForbidden
 	}
 
 	cmd := DoubleEntryCommand{
@@ -188,24 +200,18 @@ func (s *ledgerService) GetBalance(ctx context.Context, accountID string) (*Bala
 		return nil, apperrors.NewInvalidRequestError("account ID cannot be empty", nil)
 	}
 
-	account, err := s.repository.GetAccountByID(ctx, accountID)
+	snapshot, err := s.repository.GetBalanceSnapshot(ctx, accountID)
 	if err != nil {
-		logger.Error("Failed to get account for balance", "id", accountID, "error", err)
-		return nil, err
-	}
-
-	derived, err := s.repository.GetDerivedBalance(ctx, accountID)
-	if err != nil {
-		logger.Error("Failed to get derived balance", "id", accountID, "error", err)
+		logger.Error("Failed to get balance snapshot", "id", accountID, "error", err)
 		return nil, err
 	}
 
 	return &BalanceResponse{
-		AccountID:      account.ID,
-		CachedBalance:  account.Balance,
-		DerivedBalance: derived,
-		Currency:       account.Currency,
-		IsConsistent:   account.Balance == derived,
+		AccountID:      snapshot.AccountID,
+		CachedBalance:  snapshot.CachedBalance,
+		DerivedBalance: snapshot.DerivedBalance,
+		Currency:       snapshot.Currency,
+		IsConsistent:   snapshot.CachedBalance == snapshot.DerivedBalance,
 	}, nil
 }
 
@@ -246,6 +252,12 @@ func (s *ledgerService) Reconcile(ctx context.Context) (*ReconciliationResponse,
 		return nil, err
 	}
 
+	totalDebits, totalCredits, err := s.repository.GetLedgerTotals(ctx)
+	if err != nil {
+		logger.Error("Failed to get ledger totals", "error", err)
+		return nil, err
+	}
+
 	allConsistent := true
 	for _, r := range results {
 		if !r.IsConsistent {
@@ -258,8 +270,19 @@ func (s *ledgerService) Reconcile(ctx context.Context) (*ReconciliationResponse,
 		}
 	}
 
+	ledgerBalanced := totalDebits == totalCredits
+	if !ledgerBalanced {
+		logger.Error("Ledger zero-sum violation",
+			"total_debits", totalDebits,
+			"total_credits", totalCredits,
+		)
+	}
+
 	return &ReconciliationResponse{
-		Accounts:      results,
-		AllConsistent: allConsistent,
+		Accounts:       results,
+		AllConsistent:  allConsistent && ledgerBalanced,
+		TotalDebits:   totalDebits,
+		TotalCredits:  totalCredits,
+		LedgerBalanced: ledgerBalanced,
 	}, nil
 }

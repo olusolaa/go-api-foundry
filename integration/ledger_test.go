@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/akeren/go-api-foundry/domain"
 	"github.com/akeren/go-api-foundry/internal/log"
 	"github.com/akeren/go-api-foundry/internal/models"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -31,8 +33,14 @@ type LedgerAPITestSuite struct {
 
 func (s *LedgerAPITestSuite) SetupSuite() {
 	var err error
-	s.db, err = gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	s.db, err = gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=10000"), &gorm.Config{})
 	s.Require().NoError(err)
+
+	// SQLite serializes writes at the database level. Limiting to one open
+	// connection prevents "database is locked" errors under concurrent load.
+	sqlDB, err := s.db.DB()
+	s.Require().NoError(err)
+	sqlDB.SetMaxOpenConns(1)
 
 	err = s.db.AutoMigrate(&models.Account{}, &models.Transaction{}, &models.LedgerEntry{})
 	s.Require().NoError(err)
@@ -81,7 +89,7 @@ func (s *LedgerAPITestSuite) SetupTest() {
 	s.db.Exec("DELETE FROM ledger_entries")
 	s.db.Exec("DELETE FROM transactions")
 	s.db.Exec("DELETE FROM accounts WHERE id != ?", models.SystemAccountID)
-	s.db.Model(&models.Account{}).Where("id = ?", models.SystemAccountID).Updates(map[string]interface{}{
+	s.db.Model(&models.Account{}).Where("id = ?", models.SystemAccountID).Updates(map[string]any{
 		"balance": 0,
 		"version": 0,
 	})
@@ -89,20 +97,20 @@ func (s *LedgerAPITestSuite) SetupTest() {
 
 // Helper methods
 
-func (s *LedgerAPITestSuite) createAccount(name string) map[string]interface{} {
+func (s *LedgerAPITestSuite) createAccount(name string) map[string]any {
 	body, _ := json.Marshal(map[string]string{"name": name})
 	resp, err := http.Post(s.baseURL+"/v1/ledger/accounts", "application/json", bytes.NewBuffer(body))
 	s.Require().NoError(err)
 	defer resp.Body.Close()
 	s.Equal(http.StatusCreated, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	return response["data"].(map[string]interface{})
+	return response["data"].(map[string]any)
 }
 
-func (s *LedgerAPITestSuite) deposit(accountID string, amount int64, key string) map[string]interface{} {
-	body, _ := json.Marshal(map[string]interface{}{
+func (s *LedgerAPITestSuite) deposit(accountID string, amount int64, key string) map[string]any {
+	body, _ := json.Marshal(map[string]any{
 		"amount":          amount,
 		"idempotency_key": key,
 		"description":     "test deposit",
@@ -112,13 +120,13 @@ func (s *LedgerAPITestSuite) deposit(accountID string, amount int64, key string)
 	s.Require().NoError(err)
 	defer resp.Body.Close()
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
 	return response
 }
 
-func (s *LedgerAPITestSuite) withdraw(accountID string, amount int64, key string) map[string]interface{} {
-	body, _ := json.Marshal(map[string]interface{}{
+func (s *LedgerAPITestSuite) withdraw(accountID string, amount int64, key string) map[string]any {
+	body, _ := json.Marshal(map[string]any{
 		"amount":          amount,
 		"idempotency_key": key,
 		"description":     "test withdrawal",
@@ -128,9 +136,18 @@ func (s *LedgerAPITestSuite) withdraw(accountID string, amount int64, key string
 	s.Require().NoError(err)
 	defer resp.Body.Close()
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
 	return response
+}
+
+func (s *LedgerAPITestSuite) entriesByType(entries []any) map[string]map[string]any {
+	result := make(map[string]map[string]any, len(entries))
+	for _, e := range entries {
+		entry := e.(map[string]any)
+		result[entry["entry_type"].(string)] = entry
+	}
+	return result
 }
 
 // Tests
@@ -155,9 +172,9 @@ func (s *LedgerAPITestSuite) TestGetAccount() {
 
 	s.Equal(http.StatusOK, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal("Bob", data["name"])
 }
 
@@ -176,12 +193,24 @@ func (s *LedgerAPITestSuite) TestDeposit() {
 	response := s.deposit(accountID, 10000, "dep-001")
 
 	s.Equal(float64(201), response["code"])
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal("DEPOSIT", data["transaction_type"])
 	s.Equal(float64(10000), data["amount"])
 
-	entries := data["entries"].([]interface{})
+	entries := data["entries"].([]any)
 	s.Len(entries, 2)
+
+	// Verify entry details: one DEBIT on system account, one CREDIT on user account
+	entryMap := s.entriesByType(entries)
+	debit := entryMap["DEBIT"]
+	credit := entryMap["CREDIT"]
+
+	s.Equal(models.SystemAccountID, debit["account_id"])
+	s.Equal(float64(10000), debit["amount"])
+
+	s.Equal(accountID, credit["account_id"])
+	s.Equal(float64(10000), credit["amount"])
+	s.Equal(float64(10000), credit["balance_after"])
 }
 
 func (s *LedgerAPITestSuite) TestWithdraw() {
@@ -194,8 +223,22 @@ func (s *LedgerAPITestSuite) TestWithdraw() {
 	// Withdraw
 	response := s.withdraw(accountID, 3000, "wd-001")
 	s.Equal(float64(201), response["code"])
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal("WITHDRAWAL", data["transaction_type"])
+
+	// Verify entry details: DEBIT on user account, CREDIT on system account
+	entries := data["entries"].([]any)
+	s.Len(entries, 2)
+	entryMap := s.entriesByType(entries)
+
+	debit := entryMap["DEBIT"]
+	s.Equal(accountID, debit["account_id"])
+	s.Equal(float64(3000), debit["amount"])
+	s.Equal(float64(7000), debit["balance_after"]) // 10000 - 3000
+
+	credit := entryMap["CREDIT"]
+	s.Equal(models.SystemAccountID, credit["account_id"])
+	s.Equal(float64(3000), credit["amount"])
 }
 
 func (s *LedgerAPITestSuite) TestWithdrawInsufficientFunds() {
@@ -221,7 +264,7 @@ func (s *LedgerAPITestSuite) TestTransfer() {
 	s.deposit(aliceID, 10000, "dep-004")
 
 	// Transfer Alice -> Bob
-	body, _ := json.Marshal(map[string]interface{}{
+	body, _ := json.Marshal(map[string]any{
 		"source_account_id": aliceID,
 		"dest_account_id":   bobID,
 		"amount":            4000,
@@ -234,11 +277,26 @@ func (s *LedgerAPITestSuite) TestTransfer() {
 
 	s.Equal(http.StatusCreated, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal("TRANSFER", data["transaction_type"])
 	s.Equal(float64(4000), data["amount"])
+
+	// Verify entry details: DEBIT on Alice, CREDIT on Bob
+	entries := data["entries"].([]any)
+	s.Len(entries, 2)
+	entryMap := s.entriesByType(entries)
+
+	debit := entryMap["DEBIT"]
+	s.Equal(aliceID, debit["account_id"])
+	s.Equal(float64(4000), debit["amount"])
+	s.Equal(float64(6000), debit["balance_after"]) // 10000 - 4000
+
+	credit := entryMap["CREDIT"]
+	s.Equal(bobID, credit["account_id"])
+	s.Equal(float64(4000), credit["amount"])
+	s.Equal(float64(4000), credit["balance_after"]) // 0 + 4000
 }
 
 func (s *LedgerAPITestSuite) TestIdempotency() {
@@ -258,12 +316,36 @@ func (s *LedgerAPITestSuite) TestIdempotency() {
 	s.Require().NoError(err)
 	defer balanceResp.Body.Close()
 
-	var balanceResponse map[string]interface{}
+	var balanceResponse map[string]any
 	json.NewDecoder(balanceResp.Body).Decode(&balanceResponse)
-	data := balanceResponse["data"].(map[string]interface{})
+	data := balanceResponse["data"].(map[string]any)
 	s.Equal(float64(5000), data["cached_balance"])
 	s.Equal(float64(5000), data["derived_balance"])
 	s.Equal(true, data["is_consistent"])
+}
+
+func (s *LedgerAPITestSuite) TestIdempotencyMismatch() {
+	account := s.createAccount("IdempMismatch")
+	accountID := account["id"].(string)
+
+	// First deposit: $50 with key "dep-mismatch"
+	resp1 := s.deposit(accountID, 5000, "dep-mismatch")
+	s.Equal(float64(201), resp1["code"])
+
+	// Second deposit: DIFFERENT amount ($100) with SAME key — must be rejected
+	resp2 := s.deposit(accountID, 10000, "dep-mismatch")
+	s.Equal(float64(409), resp2["code"])
+	s.Contains(resp2["message"], "idempotency key already used")
+
+	// Balance should still be 5000 (only the first deposit counted)
+	balanceResp, err := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, accountID))
+	s.Require().NoError(err)
+	defer balanceResp.Body.Close()
+
+	var balanceResponse map[string]any
+	json.NewDecoder(balanceResp.Body).Decode(&balanceResponse)
+	data := balanceResponse["data"].(map[string]any)
+	s.Equal(float64(5000), data["cached_balance"])
 }
 
 func (s *LedgerAPITestSuite) TestGetBalance() {
@@ -279,9 +361,9 @@ func (s *LedgerAPITestSuite) TestGetBalance() {
 
 	s.Equal(http.StatusOK, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal(float64(7000), data["cached_balance"])
 	s.Equal(float64(7000), data["derived_balance"])
 	s.Equal(true, data["is_consistent"])
@@ -300,9 +382,9 @@ func (s *LedgerAPITestSuite) TestGetTransactions() {
 
 	s.Equal(http.StatusOK, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	data := response["data"].([]interface{})
+	data := response["data"].([]any)
 	s.Len(data, 2)
 }
 
@@ -319,10 +401,12 @@ func (s *LedgerAPITestSuite) TestReconciliation() {
 
 	s.Equal(http.StatusOK, resp.StatusCode)
 
-	var response map[string]interface{}
+	var response map[string]any
 	json.NewDecoder(resp.Body).Decode(&response)
-	data := response["data"].(map[string]interface{})
+	data := response["data"].(map[string]any)
 	s.Equal(true, data["all_consistent"])
+	s.Equal(true, data["ledger_balanced"])
+	s.Equal(data["total_debits"], data["total_credits"])
 }
 
 func (s *LedgerAPITestSuite) TestFullFlow() {
@@ -336,7 +420,7 @@ func (s *LedgerAPITestSuite) TestFullFlow() {
 	s.deposit(aliceID, 10000, "dep-flow-1")
 
 	// Transfer $40.00 from Alice to Bob
-	body, _ := json.Marshal(map[string]interface{}{
+	body, _ := json.Marshal(map[string]any{
 		"source_account_id": aliceID,
 		"dest_account_id":   bobID,
 		"amount":            4000,
@@ -352,28 +436,174 @@ func (s *LedgerAPITestSuite) TestFullFlow() {
 
 	// Verify Alice balance: $60.00
 	aliceBalance, _ := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, aliceID))
-	var aliceResp map[string]interface{}
+	var aliceResp map[string]any
 	json.NewDecoder(aliceBalance.Body).Decode(&aliceResp)
 	aliceBalance.Body.Close()
-	aliceData := aliceResp["data"].(map[string]interface{})
+	aliceData := aliceResp["data"].(map[string]any)
 	s.Equal(float64(6000), aliceData["cached_balance"])
 	s.Equal(true, aliceData["is_consistent"])
 
 	// Verify Bob balance: $20.00
 	bobBalance, _ := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, bobID))
-	var bobResp map[string]interface{}
+	var bobResp map[string]any
 	json.NewDecoder(bobBalance.Body).Decode(&bobResp)
 	bobBalance.Body.Close()
-	bobData := bobResp["data"].(map[string]interface{})
+	bobData := bobResp["data"].(map[string]any)
 	s.Equal(float64(2000), bobData["cached_balance"])
 	s.Equal(true, bobData["is_consistent"])
 
 	// Run reconciliation
 	reconcileResp, _ := http.Get(s.baseURL + "/v1/ledger/reconciliation")
-	var reconcile map[string]interface{}
+	var reconcile map[string]any
 	json.NewDecoder(reconcileResp.Body).Decode(&reconcile)
 	reconcileResp.Body.Close()
-	s.Equal(true, reconcile["data"].(map[string]interface{})["all_consistent"])
+	s.Equal(true, reconcile["data"].(map[string]any)["all_consistent"])
+}
+
+func (s *LedgerAPITestSuite) TestConcurrentDeposits() {
+	account := s.createAccount("ConcurrentUser")
+	accountID := account["id"].(string)
+
+	const goroutines = 10
+	const depositAmount = int64(1000)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func() {
+			defer wg.Done()
+			key := fmt.Sprintf("concurrent-dep-%d", i)
+			resp := s.deposit(accountID, depositAmount, key)
+			assert.Equal(s.T(), float64(201), resp["code"])
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify final balance equals sum of all deposits
+	expectedBalance := float64(goroutines * depositAmount)
+
+	resp, err := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, accountID))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	var response map[string]any
+	json.NewDecoder(resp.Body).Decode(&response)
+	data := response["data"].(map[string]any)
+	s.Equal(expectedBalance, data["cached_balance"])
+	s.Equal(expectedBalance, data["derived_balance"])
+	s.Equal(true, data["is_consistent"])
+}
+
+func (s *LedgerAPITestSuite) TestConcurrentTransfers() {
+	alice := s.createAccount("ConcAlice")
+	bob := s.createAccount("ConcBob")
+	aliceID := alice["id"].(string)
+	bobID := bob["id"].(string)
+
+	// Deposit enough to Alice
+	s.deposit(aliceID, 100000, "conc-xfr-seed")
+
+	const goroutines = 10
+	const transferAmount = int64(1000)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func() {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]any{
+				"source_account_id": aliceID,
+				"dest_account_id":   bobID,
+				"amount":            transferAmount,
+				"idempotency_key":   fmt.Sprintf("conc-xfr-%d", i),
+			})
+			resp, err := http.Post(s.baseURL+"/v1/ledger/transfers", "application/json", bytes.NewBuffer(body))
+			assert.NoError(s.T(), err)
+			resp.Body.Close()
+			assert.Equal(s.T(), http.StatusCreated, resp.StatusCode)
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify balances: Alice = 100000 - (10 * 1000) = 90000, Bob = 10 * 1000 = 10000
+	aliceResp, _ := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, aliceID))
+	var aliceBalance map[string]any
+	json.NewDecoder(aliceResp.Body).Decode(&aliceBalance)
+	aliceResp.Body.Close()
+	aliceData := aliceBalance["data"].(map[string]any)
+	s.Equal(float64(90000), aliceData["cached_balance"])
+	s.Equal(true, aliceData["is_consistent"])
+
+	bobResp, _ := http.Get(fmt.Sprintf("%s/v1/ledger/accounts/%s/balance", s.baseURL, bobID))
+	var bobBalance map[string]any
+	json.NewDecoder(bobResp.Body).Decode(&bobBalance)
+	bobResp.Body.Close()
+	bobData := bobBalance["data"].(map[string]any)
+	s.Equal(float64(10000), bobData["cached_balance"])
+	s.Equal(true, bobData["is_consistent"])
+}
+
+func (s *LedgerAPITestSuite) TestDepositToSystemAccountRejected() {
+	// Attempting to deposit to the system account should be rejected
+	response := s.deposit(models.SystemAccountID, 10000, "dep-sys-attack")
+	s.Equal(float64(400), response["code"])
+	s.Contains(response["message"], "system account")
+}
+
+func (s *LedgerAPITestSuite) TestWithdrawFromSystemAccountRejected() {
+	// Attempting to withdraw from the system account should be rejected
+	response := s.withdraw(models.SystemAccountID, 10000, "wd-sys-attack")
+	s.Equal(float64(400), response["code"])
+	s.Contains(response["message"], "system account")
+}
+
+func (s *LedgerAPITestSuite) TestTransferFromSystemAccountRejected() {
+	bob := s.createAccount("BobTarget")
+	bobID := bob["id"].(string)
+
+	// Attempting to transfer FROM the system account = printing money
+	body, _ := json.Marshal(map[string]any{
+		"source_account_id": models.SystemAccountID,
+		"dest_account_id":   bobID,
+		"amount":            999999,
+		"idempotency_key":   "xfr-sys-attack",
+	})
+	resp, err := http.Post(s.baseURL+"/v1/ledger/transfers", "application/json", bytes.NewBuffer(body))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusBadRequest, resp.StatusCode)
+
+	var response map[string]any
+	json.NewDecoder(resp.Body).Decode(&response)
+	s.Contains(response["message"], "system account")
+}
+
+func (s *LedgerAPITestSuite) TestTransferToSystemAccountRejected() {
+	alice := s.createAccount("AliceSource")
+	aliceID := alice["id"].(string)
+	s.deposit(aliceID, 10000, "dep-xfr-sys-2")
+
+	// Attempting to transfer TO the system account should be rejected
+	body, _ := json.Marshal(map[string]any{
+		"source_account_id": aliceID,
+		"dest_account_id":   models.SystemAccountID,
+		"amount":            1000,
+		"idempotency_key":   "xfr-sys-to-attack",
+	})
+	resp, err := http.Post(s.baseURL+"/v1/ledger/transfers", "application/json", bytes.NewBuffer(body))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	s.Equal(http.StatusBadRequest, resp.StatusCode)
+
+	var response map[string]any
+	json.NewDecoder(resp.Body).Decode(&response)
+	s.Contains(response["message"], "system account")
 }
 
 func (s *LedgerAPITestSuite) TestCreateAccountValidationError() {

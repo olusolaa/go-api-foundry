@@ -1,6 +1,8 @@
 package ledger
 
 import (
+	"cmp"
+
 	"github.com/akeren/go-api-foundry/internal/models"
 	"github.com/akeren/go-api-foundry/pkg/constants"
 )
@@ -79,8 +81,11 @@ type BalanceResponse struct {
 }
 
 type ReconciliationResponse struct {
-	Accounts     []AccountReconciliation `json:"accounts"`
-	AllConsistent bool                   `json:"all_consistent"`
+	Accounts      []AccountReconciliation `json:"accounts"`
+	AllConsistent bool                    `json:"all_consistent"`
+	TotalDebits   int64                  `json:"total_debits"`
+	TotalCredits  int64                  `json:"total_credits"`
+	LedgerBalanced bool                  `json:"ledger_balanced"`
 }
 
 // ========================================
@@ -88,14 +93,10 @@ type ReconciliationResponse struct {
 // ========================================
 
 func ToAccountModel(req *CreateAccountRequest) *models.Account {
-	currency := req.Currency
-	if currency == "" {
-		currency = "USD"
-	}
 	return &models.Account{
 		Name:        req.Name,
 		AccountType: models.AccountTypeUser,
-		Currency:    currency,
+		Currency:    cmp.Or(req.Currency, "USD"),
 	}
 }
 

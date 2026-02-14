@@ -2,7 +2,7 @@
 
 -- Accounts table
 CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     account_type TEXT NOT NULL CHECK (account_type IN ('USER', 'SYSTEM')),
     currency CHAR(3) NOT NULL DEFAULT 'USD',
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 -- Transactions table
 CREATE TABLE IF NOT EXISTS transactions (
-    id TEXT PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     idempotency_key TEXT UNIQUE,
     transaction_type TEXT NOT NULL CHECK (transaction_type IN ('DEPOSIT', 'WITHDRAWAL', 'TRANSFER')),
     amount BIGINT NOT NULL CHECK (amount > 0),
@@ -25,9 +25,9 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 -- Ledger entries table (immutable audit log)
 CREATE TABLE IF NOT EXISTS ledger_entries (
-    id TEXT PRIMARY KEY,
-    transaction_id TEXT NOT NULL REFERENCES transactions(id),
-    account_id TEXT NOT NULL REFERENCES accounts(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID NOT NULL REFERENCES transactions(id),
+    account_id UUID NOT NULL REFERENCES accounts(id),
     entry_type TEXT NOT NULL CHECK (entry_type IN ('DEBIT', 'CREDIT')),
     amount BIGINT NOT NULL CHECK (amount > 0),
     balance_after BIGINT NOT NULL,

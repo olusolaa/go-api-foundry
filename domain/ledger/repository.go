@@ -3,7 +3,7 @@ package ledger
 import (
 	"context"
 	"errors"
-	"sort"
+	"slices"
 
 	"github.com/akeren/go-api-foundry/internal/models"
 	apperrors "github.com/akeren/go-api-foundry/pkg/errors"
@@ -16,8 +16,9 @@ type LedgerRepository interface {
 	GetAccountByID(ctx context.Context, id string) (*models.Account, error)
 	ExecuteDoubleEntry(ctx context.Context, cmd DoubleEntryCommand) (*models.Transaction, error)
 	GetTransactionsByAccountID(ctx context.Context, accountID string, limit, offset int) ([]models.Transaction, error)
-	GetDerivedBalance(ctx context.Context, accountID string) (int64, error)
+	GetBalanceSnapshot(ctx context.Context, accountID string) (*BalanceSnapshot, error)
 	GetAllAccountsForReconciliation(ctx context.Context) ([]AccountReconciliation, error)
+	GetLedgerTotals(ctx context.Context) (totalDebits, totalCredits int64, err error)
 }
 
 // DoubleEntryCommand encapsulates all data needed for a double-entry transaction.
@@ -39,6 +40,14 @@ type AccountReconciliation struct {
 	CachedBalance  int64  `json:"cached_balance"`
 	DerivedBalance int64  `json:"derived_balance"`
 	IsConsistent   bool   `json:"is_consistent"`
+}
+
+// BalanceSnapshot holds cached and derived balances read within a single transaction.
+type BalanceSnapshot struct {
+	AccountID      string
+	CachedBalance  int64
+	DerivedBalance int64
+	Currency       string
 }
 
 type ledgerRepository struct {
@@ -63,7 +72,7 @@ func (r *ledgerRepository) GetAccountByID(ctx context.Context, id string) (*mode
 	var account models.Account
 	if err := r.db.WithContext(ctx).First(&account, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, NewAccountNotFoundError()
+			return nil, ErrAccountNotFound
 		}
 		return nil, apperrors.NewDatabaseError("failed to fetch account", err)
 	}
@@ -74,33 +83,40 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 	var result *models.Transaction
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Step 1: Check idempotency
-		if cmd.IdempotencyKey != "" {
-			var existing models.Transaction
-			if err := tx.Where("idempotency_key = ?", cmd.IdempotencyKey).
-				Preload("Entries").
-				First(&existing).Error; err == nil {
-				result = &existing
-				return nil // Idempotent return
-			}
-		}
-
-		// Step 2: Deterministic lock ordering — sort account IDs to prevent deadlocks
+		// Step 1: Deterministic lock ordering — sort account IDs to prevent deadlocks
 		accountIDs := []string{cmd.SourceAccountID, cmd.DestAccountID}
-		sort.Strings(accountIDs)
+		slices.Sort(accountIDs)
 
-		// Step 3: Lock accounts in sorted order (FOR UPDATE on PostgreSQL, no-op on SQLite)
+		// Step 2: Lock accounts in sorted order (FOR UPDATE on PostgreSQL, no-op on SQLite)
 		accounts := make(map[string]*models.Account, 2)
 		for _, id := range accountIDs {
 			var acc models.Account
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 				Where("id = ?", id).First(&acc).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return NewAccountNotFoundError()
+					return ErrAccountNotFound
 				}
 				return apperrors.NewDatabaseError("failed to lock account", err)
 			}
 			accounts[id] = &acc
+		}
+
+		// Step 3: Check idempotency AFTER acquiring locks. Because all operations
+		// involving the same accounts serialize through FOR UPDATE, by this point
+		// any previously concurrent transaction has already committed. This avoids
+		// the PostgreSQL "current transaction is aborted" problem that occurs when
+		// a UNIQUE constraint violation is handled with a fallback SELECT.
+		if cmd.IdempotencyKey != "" {
+			var existing models.Transaction
+			if err := tx.Where("idempotency_key = ?", cmd.IdempotencyKey).
+				Preload("Entries").
+				First(&existing).Error; err == nil {
+				if existing.Amount != cmd.Amount || existing.TransactionType != cmd.TransactionType {
+					return ErrIdempotencyConflict
+				}
+				result = &existing
+				return nil // Idempotent return
+			}
 		}
 
 		source := accounts[cmd.SourceAccountID]
@@ -108,15 +124,15 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 
 		// Step 4: Validate currencies match
 		if source.Currency != dest.Currency {
-			return NewCurrencyMismatchError()
+			return ErrCurrencyMismatch
 		}
 		if cmd.Currency != "" && cmd.Currency != source.Currency {
-			return NewCurrencyMismatchError()
+			return ErrCurrencyMismatch
 		}
 
 		// Step 5: Balance check — only USER accounts cannot go negative
 		if source.AccountType == models.AccountTypeUser && source.Balance < cmd.Amount {
-			return NewInsufficientFundsError()
+			return ErrInsufficientFunds
 		}
 
 		// Step 6: Create transaction record
@@ -128,16 +144,6 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 			Description:     cmd.Description,
 		}
 		if err := tx.Create(&txn).Error; err != nil {
-			if isDuplicateKey(err) {
-				// Concurrent idempotent request — reload and return
-				var existing models.Transaction
-				if loadErr := tx.Where("idempotency_key = ?", cmd.IdempotencyKey).
-					Preload("Entries").
-					First(&existing).Error; loadErr == nil {
-					result = &existing
-					return nil
-				}
-			}
 			return apperrors.NewDatabaseError("failed to create transaction", err)
 		}
 
@@ -168,7 +174,7 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 		}
 
 		// Step 9: Update source account balance and version
-		if err := tx.Model(source).Updates(map[string]interface{}{
+		if err := tx.Model(source).Updates(map[string]any{
 			"balance": sourceBalanceAfter,
 			"version": source.Version + 1,
 		}).Error; err != nil {
@@ -176,7 +182,7 @@ func (r *ledgerRepository) ExecuteDoubleEntry(ctx context.Context, cmd DoubleEnt
 		}
 
 		// Step 10: Update dest account balance and version
-		if err := tx.Model(dest).Updates(map[string]interface{}{
+		if err := tx.Model(dest).Updates(map[string]any{
 			"balance": destBalanceAfter,
 			"version": dest.Version + 1,
 		}).Error; err != nil {
@@ -221,53 +227,84 @@ func (r *ledgerRepository) GetTransactionsByAccountID(ctx context.Context, accou
 	return transactions, nil
 }
 
-func (r *ledgerRepository) GetDerivedBalance(ctx context.Context, accountID string) (int64, error) {
-	var creditSum, debitSum int64
+func (r *ledgerRepository) GetBalanceSnapshot(ctx context.Context, accountID string) (*BalanceSnapshot, error) {
+	var snapshot BalanceSnapshot
 
-	// Sum all credits
-	if err := r.db.WithContext(ctx).
-		Model(&models.LedgerEntry{}).
-		Where("account_id = ? AND entry_type = ?", accountID, models.EntryTypeCredit).
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&creditSum).Error; err != nil {
-		return 0, apperrors.NewDatabaseError("failed to calculate credit sum", err)
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var account models.Account
+		if err := tx.First(&account, "id = ?", accountID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrAccountNotFound
+			}
+			return apperrors.NewDatabaseError("failed to fetch account", err)
+		}
+
+		var derived int64
+		if err := tx.Model(&models.LedgerEntry{}).
+			Where("account_id = ?", accountID).
+			Select("COALESCE(SUM(CASE WHEN entry_type = ? THEN amount ELSE -amount END), 0)", models.EntryTypeCredit).
+			Scan(&derived).Error; err != nil {
+			return apperrors.NewDatabaseError("failed to calculate derived balance", err)
+		}
+
+		snapshot = BalanceSnapshot{
+			AccountID:      account.ID,
+			CachedBalance:  account.Balance,
+			DerivedBalance: derived,
+			Currency:       account.Currency,
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
-
-	// Sum all debits
-	if err := r.db.WithContext(ctx).
-		Model(&models.LedgerEntry{}).
-		Where("account_id = ? AND entry_type = ?", accountID, models.EntryTypeDebit).
-		Select("COALESCE(SUM(amount), 0)").
-		Scan(&debitSum).Error; err != nil {
-		return 0, apperrors.NewDatabaseError("failed to calculate debit sum", err)
-	}
-
-	return creditSum - debitSum, nil
+	return &snapshot, nil
 }
 
 func (r *ledgerRepository) GetAllAccountsForReconciliation(ctx context.Context) ([]AccountReconciliation, error) {
-	var accounts []models.Account
-	if err := r.db.WithContext(ctx).Find(&accounts).Error; err != nil {
-		return nil, apperrors.NewDatabaseError("failed to fetch accounts for reconciliation", err)
+	var results []AccountReconciliation
+
+	err := r.db.WithContext(ctx).
+		Table("accounts a").
+		Select(`a.id AS account_id,
+			a.name AS account_name,
+			a.account_type,
+			a.balance AS cached_balance,
+			COALESCE(SUM(CASE WHEN le.entry_type = ? THEN le.amount ELSE 0 END), 0) -
+			COALESCE(SUM(CASE WHEN le.entry_type = ? THEN le.amount ELSE 0 END), 0) AS derived_balance`,
+			models.EntryTypeCredit, models.EntryTypeDebit).
+		Joins("LEFT JOIN ledger_entries le ON le.account_id = a.id").
+		Group("a.id, a.name, a.account_type, a.balance").
+		Scan(&results).Error
+	if err != nil {
+		return nil, apperrors.NewDatabaseError("failed to run reconciliation", err)
 	}
 
-	results := make([]AccountReconciliation, 0, len(accounts))
-	for _, acc := range accounts {
-		derived, err := r.GetDerivedBalance(ctx, acc.ID)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, AccountReconciliation{
-			AccountID:      acc.ID,
-			AccountName:    acc.Name,
-			AccountType:    acc.AccountType,
-			CachedBalance:  acc.Balance,
-			DerivedBalance: derived,
-			IsConsistent:   acc.Balance == derived,
-		})
+	for i := range results {
+		results[i].IsConsistent = results[i].CachedBalance == results[i].DerivedBalance
 	}
 
 	return results, nil
+}
+
+func (r *ledgerRepository) GetLedgerTotals(ctx context.Context) (totalDebits, totalCredits int64, err error) {
+	type totals struct {
+		TotalDebits  int64
+		TotalCredits int64
+	}
+	var t totals
+
+	if err := r.db.WithContext(ctx).
+		Model(&models.LedgerEntry{}).
+		Select(`COALESCE(SUM(CASE WHEN entry_type = ? THEN amount ELSE 0 END), 0) AS total_debits,
+			COALESCE(SUM(CASE WHEN entry_type = ? THEN amount ELSE 0 END), 0) AS total_credits`,
+			models.EntryTypeDebit, models.EntryTypeCredit).
+		Scan(&t).Error; err != nil {
+		return 0, 0, apperrors.NewDatabaseError("failed to calculate ledger totals", err)
+	}
+
+	return t.TotalDebits, t.TotalCredits, nil
 }
 
 func isDuplicateKey(err error) bool {
