@@ -1,5 +1,7 @@
 package models
 
 var ModelRegistry = []any{
-	&WaitlistEntry{},
+	&Account{},
+	&Transaction{},
+	&LedgerEntry{},
 }
