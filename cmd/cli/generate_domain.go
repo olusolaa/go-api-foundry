@@ -257,8 +257,8 @@ func New%sController(db *gorm.DB, logger *log.Logger) *router.RESTController {
 			service := New%sService(logger, repository)
 
 			// Register handlers
-			rs.AddPostHandler(c, "", createHandler(service))
-			rs.AddGetHandler(c, "/:id", getByIDHandler(service))
+			rs.AddPostHandler(c, nil, "", createHandler(service))
+			rs.AddGetHandler(c, nil, "/:id", getByIDHandler(service))
 		},
 	)
 }

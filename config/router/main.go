@@ -28,11 +28,6 @@ type MiddlewareConfig struct {
 	TimeoutDuration time.Duration
 }
 
-func NewMiddlewareConfig() *MiddlewareConfig {
-	return &MiddlewareConfig{
-		TimeoutDuration: DefaultTimeoutDuration,
-	}
-}
 
 type Cache interface {
 	Ping(ctx context.Context) error

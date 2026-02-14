@@ -78,21 +78,6 @@ func NewConflictError(message string, err error) *AppError {
 	return NewAppError(ErrorTypeConflict, message, err)
 }
 
-func NewUnauthorizedError(message string, err error) *AppError {
-	return NewAppError(ErrorTypeUnauthorized, message, err)
-}
-
-func NewForbiddenError(message string, err error) *AppError {
-	return NewAppError(ErrorTypeForbidden, message, err)
-}
-
-func NewInternalServerError(message string, err error) *AppError {
-	return NewAppError(ErrorTypeInternalServerError, message, err)
-}
-
-func NewNoContentError(message string, err error) *AppError {
-	return NewAppError(ErrorTypeNoContent, message, err)
-}
 
 func GetErrorType(err error) string {
 	if err == nil {
