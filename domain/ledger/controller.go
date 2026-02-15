@@ -11,6 +11,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	defaultPageLimit = 50
+	maxPageLimit     = 100
+)
+
 // mapDomainError translates domain sentinel errors into HTTP status codes
 // and messages. Infrastructure errors (AppError) fall through to the
 // existing pkg/errors mapping.
@@ -33,6 +38,24 @@ func mapDomainError(err error) (int, string) {
 	default:
 		return apperrors.HTTPStatusCode(err), apperrors.GetHumanReadableMessage(err)
 	}
+}
+
+func errorResult(err error) *router.ServiceResult {
+	code, msg := mapDomainError(err)
+	return router.ErrorResult(code, msg, nil)
+}
+
+func bindJSON[T any](ctx *router.RequestContext) (*T, *router.ServiceResult) {
+	var req T
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		router.GetLogger(ctx).Error("Failed to bind request", "error", err)
+		validationErrors := apperrors.FormatValidationErrors(err, &req)
+		if len(validationErrors) > 0 {
+			return nil, router.BadRequestResult("Invalid request payload", validationErrors)
+		}
+		return nil, router.BadRequestResult("Invalid request body", nil)
+	}
+	return &req, nil
 }
 
 func NewLedgerController(db *gorm.DB, logger *log.Logger) *router.RESTController {
@@ -58,22 +81,14 @@ func NewLedgerController(db *gorm.DB, logger *log.Logger) *router.RESTController
 
 func createAccountHandler(service LedgerService) router.HandlerFunction {
 	return func(ctx *router.RequestContext) *router.ServiceResult {
-		logger := router.GetLogger(ctx)
-
-		var req CreateAccountRequest
-		if err := ctx.ShouldBindJSON(&req); err != nil {
-			logger.Error("Failed to bind request", "error", err)
-			validationErrors := apperrors.FormatValidationErrors(err, &req)
-			if len(validationErrors) > 0 {
-				return router.BadRequestResult("Invalid request payload", validationErrors)
-			}
-			return router.BadRequestResult("Invalid request body", nil)
+		req, bindErr := bindJSON[CreateAccountRequest](ctx)
+		if bindErr != nil {
+			return bindErr
 		}
 
-		response, err := service.CreateAccount(ctx.Request.Context(), &req)
+		response, err := service.CreateAccount(ctx.Request.Context(), req)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.CreatedResult(response, "Account")
@@ -89,8 +104,7 @@ func getAccountHandler(service LedgerService) router.HandlerFunction {
 
 		response, err := service.GetAccount(ctx.Request.Context(), id)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.OKResult(response, "Account retrieved successfully")
@@ -99,27 +113,19 @@ func getAccountHandler(service LedgerService) router.HandlerFunction {
 
 func depositHandler(service LedgerService) router.HandlerFunction {
 	return func(ctx *router.RequestContext) *router.ServiceResult {
-		logger := router.GetLogger(ctx)
-
 		id := ctx.Param("id")
 		if id == "" {
 			return router.BadRequestResult("Account ID is required", nil)
 		}
 
-		var req DepositRequest
-		if err := ctx.ShouldBindJSON(&req); err != nil {
-			logger.Error("Failed to bind request", "error", err)
-			validationErrors := apperrors.FormatValidationErrors(err, &req)
-			if len(validationErrors) > 0 {
-				return router.BadRequestResult("Invalid request payload", validationErrors)
-			}
-			return router.BadRequestResult("Invalid request body", nil)
+		req, bindErr := bindJSON[DepositRequest](ctx)
+		if bindErr != nil {
+			return bindErr
 		}
 
-		response, err := service.Deposit(ctx.Request.Context(), id, &req)
+		response, err := service.Deposit(ctx.Request.Context(), id, req)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.CreatedResult(response, "Deposit")
@@ -128,27 +134,19 @@ func depositHandler(service LedgerService) router.HandlerFunction {
 
 func withdrawHandler(service LedgerService) router.HandlerFunction {
 	return func(ctx *router.RequestContext) *router.ServiceResult {
-		logger := router.GetLogger(ctx)
-
 		id := ctx.Param("id")
 		if id == "" {
 			return router.BadRequestResult("Account ID is required", nil)
 		}
 
-		var req WithdrawRequest
-		if err := ctx.ShouldBindJSON(&req); err != nil {
-			logger.Error("Failed to bind request", "error", err)
-			validationErrors := apperrors.FormatValidationErrors(err, &req)
-			if len(validationErrors) > 0 {
-				return router.BadRequestResult("Invalid request payload", validationErrors)
-			}
-			return router.BadRequestResult("Invalid request body", nil)
+		req, bindErr := bindJSON[WithdrawRequest](ctx)
+		if bindErr != nil {
+			return bindErr
 		}
 
-		response, err := service.Withdraw(ctx.Request.Context(), id, &req)
+		response, err := service.Withdraw(ctx.Request.Context(), id, req)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.CreatedResult(response, "Withdrawal")
@@ -157,22 +155,14 @@ func withdrawHandler(service LedgerService) router.HandlerFunction {
 
 func transferHandler(service LedgerService) router.HandlerFunction {
 	return func(ctx *router.RequestContext) *router.ServiceResult {
-		logger := router.GetLogger(ctx)
-
-		var req TransferRequest
-		if err := ctx.ShouldBindJSON(&req); err != nil {
-			logger.Error("Failed to bind request", "error", err)
-			validationErrors := apperrors.FormatValidationErrors(err, &req)
-			if len(validationErrors) > 0 {
-				return router.BadRequestResult("Invalid request payload", validationErrors)
-			}
-			return router.BadRequestResult("Invalid request body", nil)
+		req, bindErr := bindJSON[TransferRequest](ctx)
+		if bindErr != nil {
+			return bindErr
 		}
 
-		response, err := service.Transfer(ctx.Request.Context(), &req)
+		response, err := service.Transfer(ctx.Request.Context(), req)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.CreatedResult(response, "Transfer")
@@ -188,8 +178,7 @@ func getBalanceHandler(service LedgerService) router.HandlerFunction {
 
 		response, err := service.GetBalance(ctx.Request.Context(), id)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.OKResult(response, "Balance retrieved successfully")
@@ -203,11 +192,11 @@ func getTransactionsHandler(service LedgerService) router.HandlerFunction {
 			return router.BadRequestResult("Account ID is required", nil)
 		}
 
-		limit := 50
+		limit := defaultPageLimit
 		offset := 0
 
 		if l := ctx.Query("limit"); l != "" {
-			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= maxPageLimit {
 				limit = parsed
 			}
 		}
@@ -219,8 +208,7 @@ func getTransactionsHandler(service LedgerService) router.HandlerFunction {
 
 		response, err := service.GetTransactions(ctx.Request.Context(), id, limit, offset)
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.OKResult(response, "Transactions retrieved successfully")
@@ -231,8 +219,7 @@ func reconciliationHandler(service LedgerService) router.HandlerFunction {
 	return func(ctx *router.RequestContext) *router.ServiceResult {
 		response, err := service.Reconcile(ctx.Request.Context())
 		if err != nil {
-			code, msg := mapDomainError(err)
-			return router.ErrorResult(code, msg, nil)
+			return errorResult(err)
 		}
 
 		return router.OKResult(response, "Reconciliation completed successfully")

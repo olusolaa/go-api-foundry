@@ -22,7 +22,7 @@ accounts
 ├── account_type TEXT NOT NULL (USER | SYSTEM)
 ├── currency CHAR(3) DEFAULT 'USD'
 ├── balance BIGINT DEFAULT 0        ← cached, verified by reconciliation
-├── version BIGINT DEFAULT 0        ← optimistic concurrency
+├── version BIGINT DEFAULT 0        ← audit trail
 ├── created_at, updated_at
 
 transactions
